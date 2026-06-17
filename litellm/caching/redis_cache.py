@@ -903,6 +903,40 @@ class RedisCache(BaseCache):
             )
             raise e
 
+    @_redis_circuit_breaker_guard
+    async def async_set_max(
+        self,
+        key: str,
+        value: float,
+        ttl: int | None = None,
+    ) -> float | None:
+        """Atomically set ``key`` to ``value`` only when ``value`` is greater
+        than the stored value (or the key is unset), refreshing the TTL.
+
+        Monotonic by construction: it never lowers the stored value, so a repair
+        that writes an authoritative-but-slightly-stale total cannot clobber a
+        concurrent increment that has already pushed the counter higher. The
+        GET/compare/SET runs in a single Lua call, so it is also atomic across
+        racing callers and pods. Returns the resulting value.
+        """
+        from redis.asyncio import Redis
+
+        _redis_client: Redis = self.init_async_client()  # type: ignore
+        _used_ttl = self.get_ttl(ttl=ttl)
+        key = self.check_and_fix_namespace(key=key)
+        lua = (
+            "local cur = redis.call('GET', KEYS[1]) "
+            "if cur == false or tonumber(cur) < tonumber(ARGV[1]) then "
+            "redis.call('SET', KEYS[1], ARGV[1]) "
+            "if tonumber(ARGV[2]) > 0 then redis.call('EXPIRE', KEYS[1], ARGV[2]) end "
+            "return ARGV[1] end "
+            "return cur"
+        )
+        result = await _redis_client.eval(
+            lua, 1, key, str(value), str(int(_used_ttl or 0))
+        )
+        return float(result) if result is not None else None
+
     async def flush_cache_buffer(self):
         print_verbose(
             f"flushing to redis....reached size of buffer {len(self.redis_batch_writing_buffer)}"
