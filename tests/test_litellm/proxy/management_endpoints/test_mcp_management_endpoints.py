@@ -3914,6 +3914,88 @@ async def test_fetch_all_mcp_servers_env_vars_full_admin_vs_view_only():
     ] == "super-secret"
 
 
+def _leaky_list_server() -> "LiteLLM_MCPServerTable":
+    """A server whose url/static_headers/env carry embedded secrets, for the
+    list-endpoint sanitization tests. ``model_construct`` skips validation so
+    the raw values survive verbatim."""
+    return LiteLLM_MCPServerTable.model_construct(
+        server_id="leaky-list-server",
+        server_name="Leaky List Server",
+        alias="Leaky List Server",
+        transport=MCPTransport.http,
+        url="https://leaky.example.com/mcp?api_key=sk-embedded-in-url",
+        static_headers={"Authorization": "Bearer sk-secret-header"},
+        env={"UPSTREAM_TOKEN": "sk-secret-env"},
+        env_vars=[
+            {"name": "GLOBAL_KEY", "value": "super-secret", "scope": "global"},
+        ],
+        credentials={"auth_value": "sk-explicit-credential"},
+    )
+
+
+async def _fetch_all_via_view_all(user_role: LitellmUserRoles):
+    """Drive GET /v1/mcp/server in view_all mode for the given role using the
+    real role helpers (the full-admin gate is never patched)."""
+    server = _leaky_list_server()
+    with (
+        patch(
+            "litellm.proxy.management_endpoints.mcp_management_endpoints._get_user_mcp_management_mode",
+            return_value="view_all",
+        ),
+        patch(
+            "litellm.proxy.management_endpoints.mcp_management_endpoints.global_mcp_server_manager.get_all_mcp_servers_unfiltered",
+            AsyncMock(return_value=[server]),
+        ),
+        patch(
+            "litellm.proxy.proxy_server.prisma_client",
+            None,
+        ),
+    ):
+        result = await mgmt_endpoints.fetch_all_mcp_servers(
+            user_api_key_dict=generate_mock_user_api_key_auth(user_role=user_role),
+        )
+    return server, result
+
+
+@pytest.mark.asyncio
+async def test_list_mcp_servers_sanitized_for_view_only_admin():
+    """PROXY_ADMIN_VIEW_ONLY listing servers must go through the non-admin
+    sanitizer: url and static_headers cleared, env emptied, env_vars dropped.
+    A mutation swapping _user_is_full_admin() back to _user_has_admin_view()
+    (which also grants view-only admins) would return the raw url/headers and
+    fail this. The real role helpers are exercised; the gate is not patched."""
+    source, result = await _fetch_all_via_view_all(
+        LitellmUserRoles.PROXY_ADMIN_VIEW_ONLY
+    )
+
+    assert len(result) == 1
+    sanitized = result[0]
+    assert sanitized.server_id == "leaky-list-server"
+    assert sanitized.url is None
+    assert sanitized.static_headers is None
+    assert sanitized.env == {}
+    assert sanitized.env_vars is None
+    assert sanitized.credentials is None
+
+    # The source record must never be mutated by sanitization.
+    assert source.url == "https://leaky.example.com/mcp?api_key=sk-embedded-in-url"
+    assert source.static_headers == {"Authorization": "Bearer sk-secret-header"}
+
+
+@pytest.mark.asyncio
+async def test_list_mcp_servers_full_admin_still_sees_secrets():
+    """The view-only redaction must not over-redact for a FULL PROXY_ADMIN,
+    who needs url/static_headers to populate the edit form. Only the explicit
+    credentials field is cleared for full admins on the list endpoint."""
+    _, result = await _fetch_all_via_view_all(LitellmUserRoles.PROXY_ADMIN)
+
+    assert len(result) == 1
+    raw = result[0]
+    assert raw.url == "https://leaky.example.com/mcp?api_key=sk-embedded-in-url"
+    assert raw.static_headers == {"Authorization": "Bearer sk-secret-header"}
+    assert raw.credentials is None
+
+
 def _make_env_var_server(
     *,
     server_id: str = "srv-1",

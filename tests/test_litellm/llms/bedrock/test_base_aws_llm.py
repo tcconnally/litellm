@@ -185,6 +185,45 @@ def test_aws_profile_not_found_raises_generic_error():
     assert err.message == "The specified AWS profile could not be found."
 
 
+def test_get_credentials_does_not_log_aws_profile_value():
+    """get_credentials logs aws_profile_name as a [set=True] boolean only. The
+    resolved profile value can itself be a secret (os.environ/ or an upper-case
+    env lookup), so it must never be reflected into the verbose debug log. This
+    fails if the format string is changed to interpolate the value (e.g.
+    'aws_profile_name=%s')."""
+    import logging
+
+    sentinel = "super-secret-profile-do-not-log"
+
+    captured = []
+
+    class _ListHandler(logging.Handler):
+        def emit(self, record):
+            captured.append(record.getMessage())
+
+    handler = _ListHandler()
+    verbose_logger = logging.getLogger("LiteLLM")
+    previous_level = verbose_logger.level
+    verbose_logger.addHandler(handler)
+    verbose_logger.setLevel(logging.DEBUG)
+
+    base = BaseAWSLLM()
+    try:
+        with patch.object(
+            base,
+            "_auth_with_aws_profile",
+            return_value=(Credentials("prof-ak", "prof-sk", None), None),
+        ):
+            base.get_credentials(aws_profile_name=sentinel)
+    finally:
+        verbose_logger.removeHandler(handler)
+        verbose_logger.setLevel(previous_level)
+
+    combined = "\n".join(captured)
+    assert sentinel not in combined
+    assert "aws_profile_name=[set=True]" in combined
+
+
 def test_web_identity_path_not_cached_in_iam_cache():
     base = BaseAWSLLM()
     with patch.object(
