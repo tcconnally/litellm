@@ -184,6 +184,16 @@ def test_aws_profile_not_found_raises_generic_error():
     assert secret_profile_value not in str(err)
     assert err.message == "The specified AWS profile could not be found."
 
+    # the original ProfileNotFound (which embeds the profile value) must not
+    # be rendered as a chained cause/context, or a handler that logs the full
+    # traceback would re-leak it
+    assert err.__cause__ is None
+    assert err.__suppress_context__ is True
+    import traceback
+
+    rendered = "".join(traceback.format_exception(type(err), err, err.__traceback__))
+    assert secret_profile_value not in rendered
+
 
 def test_get_credentials_does_not_log_aws_profile_value():
     """get_credentials logs aws_profile_name as a [set=True] boolean only. The
@@ -941,7 +951,11 @@ def test_different_roles_without_session_names_should_not_share_cache():
             },
         ),
     ],
-    ids=["no_region_or_endpoint", "bedrock_region_ignored_for_sts", "explicit_sts_endpoint"],
+    ids=[
+        "no_region_or_endpoint",
+        "bedrock_region_ignored_for_sts",
+        "explicit_sts_endpoint",
+    ],
 )
 def test_eks_irsa_ambient_credentials_used(role_kwargs, expected_client_kwargs):
     """
@@ -1333,7 +1347,11 @@ def test_sts_endpoint_region_matches_bedrock_region_param():
             },
         ),
     ],
-    ids=["no_region_or_endpoint", "bedrock_region_ignored_for_sts", "explicit_sts_endpoint"],
+    ids=[
+        "no_region_or_endpoint",
+        "bedrock_region_ignored_for_sts",
+        "explicit_sts_endpoint",
+    ],
 )
 def test_explicit_credentials_used_when_provided(role_kwargs, expected_client_kwargs):
     """

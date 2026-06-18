@@ -1236,7 +1236,7 @@ class BaseAWSLLM:
 
         # uses auth values from AWS profile usually stored in ~/.aws/credentials
         # map any failure to a generic error so the profile value is not
-        # reflected back in the exception message
+        # reflected back in the exception message or the chained traceback
         try:
             with tracer.trace("boto3.Session(profile_name=aws_profile_name)"):
                 client = boto3.Session(profile_name=aws_profile_name)
@@ -1245,7 +1245,7 @@ class BaseAWSLLM:
             raise AwsAuthError(
                 message="The specified AWS profile could not be found.",
                 status_code=400,
-            )
+            ) from None
 
     @tracer.wrap()
     def _auth_with_aws_session_token(
